@@ -1,0 +1,1 @@
+pip install 'torchmetrics==0.6.0' 'neptune-client<1'

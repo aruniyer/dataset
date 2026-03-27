@@ -1,0 +1,34 @@
+{
+  "stages": [
+    {
+      "name": "stage0_full_test_split",
+      "description": "Full SWE-CARE test split",
+      "instances": 671,
+      "comments": 1313
+    },
+    {
+      "name": "stage1_comment_filter",
+      "description": "LLM-based comment quality filter",
+      "instances": 410,
+      "comments": 595
+    },
+    {
+      "name": "stage2_docker_image",
+      "description": "Docker image available",
+      "instances": 410,
+      "comments": 595
+    },
+    {
+      "name": "stage3_testgen_verified",
+      "description": "Test-gen fail\u2192pass verified",
+      "instances": 339,
+      "comments": 485
+    },
+    {
+      "name": "stage4_agent_resolved",
+      "description": "Agent resolved (resolved comments only)",
+      "instances": 184,
+      "comments": 234
+    }
+  ]
+}

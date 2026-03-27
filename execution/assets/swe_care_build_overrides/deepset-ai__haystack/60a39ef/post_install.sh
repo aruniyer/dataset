@@ -1,0 +1,1 @@
+pip install "pydantic<2" "scikit-learn==1.1.3" "numpy<2"
