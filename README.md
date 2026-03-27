@@ -79,6 +79,9 @@ uv run python -m execution.build_swe_care \
   --max-workers 4
 ```
 
+Prebuilt Docker images are also published at:
+`https://github.com/orgs/c-CRAB-Benchmark/packages`
+
 ### 2. Regenerate executable tests
 
 ```bash

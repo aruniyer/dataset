@@ -33,6 +33,10 @@ Default SWE-CARE image tags:
 
 - `reviewbench/{org}__{repo}-{pull_number}:latest`
 
+Published package images are available at:
+
+- `https://github.com/orgs/c-CRAB-Benchmark/packages`
+
 After build:
 
 ```bash
