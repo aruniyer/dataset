@@ -2,12 +2,14 @@
 
 Build execution environments as Docker images for SWE-CARE instances.
 
-Language support is inferred per dataset row (or language override) and currently includes:
+Language support is inferred per dataset row (or language override) and the builder currently implements:
 - Python (full dependency install path)
 - JavaScript/TypeScript (install/check Node runtime)
 
+By default, rows without Python are skipped. Pass `--include-non-python` if you also want JavaScript/TypeScript-only rows.
+
 If both Python and JS/TS are present, Python setup runs and Node is installed.
-If the row is JS/TS-only, Python package setup is skipped.
+If `--include-non-python` is set and the row is JS/TS-only, Python package setup is skipped.
 
 ## CLI usage
 
@@ -22,6 +24,9 @@ python -m execution.build_swe_care --split test --repo pandas-dev/pandas --max-w
 python -m execution.build_swe_care --split test --max-workers 4 \
   --instance pandas-dev__pandas__22a6bff \
   --instance scipy__scipy__57e11f0,cupy__cupy__158ac6a
+
+# Include JS/TS-only rows as well
+python -m execution.build_swe_care --split test --include-non-python --max-workers 4
 ```
 
 Default SWE-CARE image tags:
@@ -167,7 +172,7 @@ python -m execution.build_swe_care --split test --max-workers 4 --build-timeout-
 SWE-CARE `language` rows can be monkey-patched using a local JSON file.
 By default, `execution/build_swe_care.py` reads:
 
-- `execution/swe_care_language_overrides.json`
+- `execution/assets/swe_care_language_overrides.json`
 
 The file can be empty (or `{}`), which means no overrides.
 
@@ -176,7 +181,7 @@ Run explicitly with a custom file if needed:
 ```bash
 python -m execution.build_swe_care \
   --split test \
-  --language-overrides-file execution/swe_care_language_overrides.example.json
+  --language-overrides-file /path/to/language_overrides.json
 ```
 
 Supported override file shapes:
