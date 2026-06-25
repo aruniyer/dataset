@@ -1,2 +1,0 @@
-execution/assets/claude filter=lfs diff=lfs merge=lfs -text
-execution/assets/uv filter=lfs diff=lfs merge=lfs -text

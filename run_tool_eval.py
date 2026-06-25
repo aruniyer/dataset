@@ -26,7 +26,9 @@ from execution.container_runtime import DockerContainerSession, get_docker_image
 from pipeline.agent_resolver import (
     build_tool_prompt,
     invoke_claude_in_container,
+    invoke_copilot_in_container,
     setup_claude_in_container,
+    setup_copilot_in_container,
     verify_with_test,
 )
 
@@ -68,7 +70,9 @@ def load_testgen_results(testgen_dir: Path, instance_id: str) -> dict | None:
     return json.loads(result_file.read_text())
 
 
-def load_tool_findings(tool_results_dir: Path, instance_id: str, tool: str) -> dict | None:
+def load_tool_findings(
+    tool_results_dir: Path, instance_id: str, tool: str
+) -> dict | None:
     """Load tool result.json for an instance.
 
     Returns the tool's data dict (with 'findings', 'success', etc.), or None if not found.
@@ -102,6 +106,7 @@ def process_tool_instance(
     tool: str,
     docker_image: str,
     credentials_path: Path,
+    agent: str = "claude-code",
 ) -> dict:
     """Process a single instance: apply tool findings via Claude Code and verify.
 
@@ -122,9 +127,7 @@ def process_tool_instance(
     patch_to_review = instance["commit_to_review"]["patch_to_review"]
 
     findings = tool_data.get("findings", [])
-    logger.info(
-        "Processing instance: %s (%d findings)", instance_id, len(findings)
-    )
+    logger.info("Processing instance: %s (%d findings)", instance_id, len(findings))
 
     instance_dir = output_dir / instance_id.replace("/", "__")
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +149,9 @@ def process_tool_instance(
             "results": [],
             "error": "No successful Stage 3 tests found",
         }
-        (instance_dir / "result.json").write_text(json.dumps(result, indent=2, default=str))
+        (instance_dir / "result.json").write_text(
+            json.dumps(result, indent=2, default=str)
+        )
         return result
 
     # Determine language from first successful test
@@ -171,18 +176,47 @@ def process_tool_instance(
     # Remove any stale container
     rm_result = subprocess.run(
         ["docker", "rm", "-f", container_name],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if rm_result.returncode == 0 and rm_result.stdout.strip():
         time.sleep(2)
 
     volumes = []
-    if credentials_path.exists():
-        volumes.append(f"{credentials_path}:/etc/claude-credentials.json:ro")
+    env = {}
+
+    if agent == "copilot":
+        import os
+
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            logger.error("GITHUB_TOKEN env var required for Copilot agent")
+            result = {
+                "instance_id": instance_id,
+                "repo": repo,
+                "tool": tool,
+                "model": model,
+                "num_findings": len(findings),
+                "agent_diff": "",
+                "num_tests": len(stage3_tests),
+                "num_tests_passed": 0,
+                "test_pass_rate": 0.0,
+                "results": [],
+                "error": "GITHUB_TOKEN env var not set",
+            }
+            (instance_dir / "result.json").write_text(
+                json.dumps(result, indent=2, default=str)
+            )
+            return result
+        env["GITHUB_TOKEN"] = github_token
+    else:
+        if credentials_path.exists():
+            volumes.append(f"{credentials_path}:/etc/claude-credentials.json:ro")
 
     session = DockerContainerSession(
         docker_image,
         name=container_name,
+        env=env if env else None,
         volumes=volumes,
     )
 
@@ -193,8 +227,11 @@ def process_tool_instance(
         session.start()
         logger.info("Started container %s (image: %s)", container_name, docker_image)
 
-        # Setup Claude Code in container
-        setup_claude_in_container(session)
+        # Setup agent in container
+        if agent == "copilot":
+            setup_copilot_in_container(session)
+        else:
+            setup_claude_in_container(session)
 
         # Reset to head commit
         reset_result = session.run_command(
@@ -217,23 +254,30 @@ def process_tool_instance(
                 "results": [],
                 "error": error,
             }
-            (instance_dir / "result.json").write_text(json.dumps(result, indent=2, default=str))
+            (instance_dir / "result.json").write_text(
+                json.dumps(result, indent=2, default=str)
+            )
             return result
 
         # Reinstall before agent runs
         if language == "python":
             session.run_command("pip install -e . --no-deps --quiet", timeout=120)
 
-        # Build prompt and invoke Claude Code
+        # Build prompt and invoke agent
         prompt = build_tool_prompt(
             findings=findings,
             patch_to_review=patch_to_review,
             repo=repo,
         )
-        logger.info("  Invoking Claude Code for %d finding(s)...", len(findings))
-        agent_stdout, agent_rc = invoke_claude_in_container(session, prompt, model)
+        logger.info("  Invoking %s for %d finding(s)...", agent, len(findings))
+
+        if agent == "copilot":
+            agent_stdout, agent_rc = invoke_copilot_in_container(session, prompt)
+        else:
+            agent_stdout, agent_rc = invoke_claude_in_container(session, prompt, model)
+
         logger.info(
-            "  Claude Code returned (rc=%d, output=%d chars)", agent_rc, len(agent_stdout)
+            "  %s returned (rc=%d, output=%d chars)", agent, agent_rc, len(agent_stdout)
         )
 
         # Capture git diff
@@ -271,16 +315,16 @@ def process_tool_instance(
                 test_passed, test_output = verify_with_test(
                     session, test_code, test_filename, language
                 )
-                logger.info(
-                    "  Test %d: %s", i, "PASS" if test_passed else "FAIL"
+                logger.info("  Test %d: %s", i, "PASS" if test_passed else "FAIL")
+                test_results.append(
+                    {
+                        "comment_index": i,
+                        "comment_text": entry.get("comment_text", ""),
+                        "test_passed": test_passed,
+                        "test_output": test_output,
+                        "error": None,
+                    }
                 )
-                test_results.append({
-                    "comment_index": i,
-                    "comment_text": entry.get("comment_text", ""),
-                    "test_passed": test_passed,
-                    "test_output": test_output,
-                    "error": None,
-                })
 
     except Exception as e:
         logger.exception("  Error processing instance")
@@ -320,7 +364,10 @@ def process_tool_instance(
     result_file.write_text(json.dumps(result, indent=2, default=str))
     logger.info(
         "Result saved to %s (tests: %d/%d passed = %.1f%%)",
-        result_file, num_tests_passed, num_tests, test_pass_rate * 100,
+        result_file,
+        num_tests_passed,
+        num_tests,
+        test_pass_rate * 100,
     )
 
     return result
@@ -331,36 +378,59 @@ def main():
         description="Evaluate a review tool using Claude Code in Docker"
     )
     parser.add_argument(
-        "--instance-id", type=str, required=True,
+        "--instance-id",
+        type=str,
+        required=True,
         help="Instance ID to process",
     )
     parser.add_argument(
-        "--tool", type=str, default=DEFAULT_TOOL,
+        "--tool",
+        type=str,
+        default=DEFAULT_TOOL,
         help=f"Review tool name (default: {DEFAULT_TOOL})",
     )
     parser.add_argument(
-        "--tool-results-dir", type=str, default=DEFAULT_TOOL_RESULTS_DIR,
+        "--tool-results-dir",
+        type=str,
+        default=DEFAULT_TOOL_RESULTS_DIR,
         help=f"Directory with tool result.json files (default: {DEFAULT_TOOL_RESULTS_DIR})",
     )
     parser.add_argument(
-        "--testgen-dir", type=str, default=DEFAULT_TESTGEN_DIR,
+        "--testgen-dir",
+        type=str,
+        default=DEFAULT_TESTGEN_DIR,
         help=f"Testgen results directory (default: {DEFAULT_TESTGEN_DIR})",
     )
     parser.add_argument(
-        "--stage3-file", type=str, default=DEFAULT_STAGE3_FILE,
+        "--stage3-file",
+        type=str,
+        default=DEFAULT_STAGE3_FILE,
         help=f"Stage 3 JSONL file (default: {DEFAULT_STAGE3_FILE})",
     )
     parser.add_argument(
-        "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
+        "--output-dir",
+        type=str,
+        default=DEFAULT_OUTPUT_DIR,
         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL,
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
         help=f"Claude model to use (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--credentials", type=str, default=str(DEFAULT_CREDENTIALS),
+        "--credentials",
+        type=str,
+        default=str(DEFAULT_CREDENTIALS),
         help=f"Path to Claude credentials file (default: {DEFAULT_CREDENTIALS})",
+    )
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default="claude-code",
+        choices=["claude-code", "copilot"],
+        help="Resolution agent to use (default: claude-code)",
     )
 
     args = parser.parse_args()
@@ -383,7 +453,8 @@ def main():
     if testgen_results is None:
         logger.error(
             "Testgen results not found for %s in %s",
-            args.instance_id, testgen_dir,
+            args.instance_id,
+            testgen_dir,
         )
         sys.exit(1)
 
@@ -392,7 +463,8 @@ def main():
     if tool_data is None:
         logger.error(
             "Tool findings not found for %s in %s",
-            args.instance_id, tool_results_dir,
+            args.instance_id,
+            tool_results_dir,
         )
         sys.exit(1)
 
@@ -424,6 +496,7 @@ def main():
         tool=args.tool,
         docker_image=docker_image,
         credentials_path=credentials_path,
+        agent=args.agent,
     )
     elapsed = time.time() - t0
 

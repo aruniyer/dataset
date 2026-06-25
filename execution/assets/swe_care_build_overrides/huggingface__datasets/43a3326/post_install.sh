@@ -1,1 +1,0 @@
-pip install "numpy<2" "pyarrow==12.0.1" "huggingface_hub==0.0.19"

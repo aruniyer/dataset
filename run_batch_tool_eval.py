@@ -73,6 +73,7 @@ def write_summary(
     all_results: list[dict],
     elapsed: float,
     tool: str,
+    agent: str = "claude-code",
 ) -> dict:
     """Write summary.json with aggregated stats."""
     total_tests = sum(r.get("num_tests", 0) for r in all_results)
@@ -98,7 +99,8 @@ def write_summary(
     for rd in repo_data.values():
         rd["test_pass_rate"] = (
             rd["total_tests_passed"] / rd["total_tests"]
-            if rd["total_tests"] > 0 else 0.0
+            if rd["total_tests"] > 0
+            else 0.0
         )
 
     # Get model from first result
@@ -119,7 +121,7 @@ def write_summary(
         "elapsed_seconds": elapsed,
         "model": model,
         "tool": tool,
-        "agent": "claude-code",
+        "agent": agent,
         "repo_summary": list(repo_data.values()),
         "instance_results": [
             {
@@ -146,52 +148,81 @@ def main():
     )
 
     parser.add_argument(
-        "--tool", type=str, default=DEFAULT_TOOL,
+        "--tool",
+        type=str,
+        default=DEFAULT_TOOL,
         help=f"Review tool name (default: {DEFAULT_TOOL})",
     )
     parser.add_argument(
-        "--tool-results-dir", type=str, default=DEFAULT_TOOL_RESULTS_DIR,
+        "--tool-results-dir",
+        type=str,
+        default=DEFAULT_TOOL_RESULTS_DIR,
         help=f"Directory with tool result.json files (default: {DEFAULT_TOOL_RESULTS_DIR})",
     )
     parser.add_argument(
-        "--stage3-file", type=str, default=DEFAULT_STAGE3_FILE,
+        "--stage3-file",
+        type=str,
+        default=DEFAULT_STAGE3_FILE,
         help=f"Stage 3 JSONL file (default: {DEFAULT_STAGE3_FILE})",
     )
     parser.add_argument(
-        "--testgen-dir", type=str, default=DEFAULT_TESTGEN_DIR,
+        "--testgen-dir",
+        type=str,
+        default=DEFAULT_TESTGEN_DIR,
         help=f"Testgen results directory (default: {DEFAULT_TESTGEN_DIR})",
     )
     parser.add_argument(
-        "--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
+        "--output-dir",
+        type=str,
+        default=DEFAULT_OUTPUT_DIR,
         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL,
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
         help=f"Claude model to use (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--credentials", type=str, default=str(DEFAULT_CREDENTIALS),
+        "--credentials",
+        type=str,
+        default=str(DEFAULT_CREDENTIALS),
         help=f"Path to Claude credentials file (default: {DEFAULT_CREDENTIALS})",
     )
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="Number of parallel workers (default: 1)",
     )
     parser.add_argument(
-        "--repo", type=str, default=None,
+        "--repo",
+        type=str,
+        default=None,
         help="Only process instances for this repo",
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit",
+        type=int,
+        default=None,
         help="Maximum number of instances to process",
     )
     parser.add_argument(
-        "--no-resume", action="store_true",
+        "--no-resume",
+        action="store_true",
         help="Re-process all instances even if results already exist",
     )
     parser.add_argument(
-        "--include-empty", action="store_true",
+        "--include-empty",
+        action="store_true",
         help="Include instances where the tool had no findings (marked as 0 tests passed)",
+    )
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default="claude-code",
+        choices=["claude-code", "copilot"],
+        help="Resolution agent to use (default: claude-code)",
     )
 
     args = parser.parse_args()
@@ -219,7 +250,7 @@ def main():
 
     # Apply limit
     if args.limit and len(all_stage3) > args.limit:
-        all_stage3 = all_stage3[:args.limit]
+        all_stage3 = all_stage3[: args.limit]
         logger.info("Limited to %d instances", len(all_stage3))
 
     if not all_stage3:
@@ -245,65 +276,8 @@ def main():
         docker_image = get_docker_image_name(iid)
         if not docker_image_exists(docker_image):
             logger.warning("No Docker image for %s (%s), skipping", iid, docker_image)
-            all_results.append({
-                "instance_id": iid,
-                "repo": instance["repo"],
-                "tool": args.tool,
-                "model": args.model,
-                "num_findings": 0,
-                "agent_diff": "",
-                "num_tests": 0,
-                "num_tests_passed": 0,
-                "test_pass_rate": 0.0,
-                "results": [],
-                "error": f"Docker image not found: {docker_image}",
-            })
-            continue
-
-        # Check testgen results
-        testgen = load_testgen_results(testgen_dir, iid)
-        if testgen is None:
-            logger.warning("No testgen results for %s, skipping", iid)
-            all_results.append({
-                "instance_id": iid,
-                "repo": instance["repo"],
-                "tool": args.tool,
-                "model": args.model,
-                "num_findings": 0,
-                "agent_diff": "",
-                "num_tests": 0,
-                "num_tests_passed": 0,
-                "test_pass_rate": 0.0,
-                "results": [],
-                "error": "No testgen results found",
-            })
-            continue
-
-        # Check tool findings
-        tool_data = load_tool_findings(tool_results_dir, iid, args.tool)
-        if tool_data is None:
-            logger.warning("No tool findings for %s, skipping", iid)
-            all_results.append({
-                "instance_id": iid,
-                "repo": instance["repo"],
-                "tool": args.tool,
-                "model": args.model,
-                "num_findings": 0,
-                "agent_diff": "",
-                "num_tests": 0,
-                "num_tests_passed": 0,
-                "test_pass_rate": 0.0,
-                "results": [],
-                "error": "No tool findings found",
-            })
-            continue
-
-        if not tool_data.get("success") or not tool_data.get("findings"):
-            if args.include_empty:
-                logger.info(
-                    "Tool had no findings for %s (include-empty: recording as 0 tests)", iid
-                )
-                all_results.append({
+            all_results.append(
+                {
                     "instance_id": iid,
                     "repo": instance["repo"],
                     "tool": args.tool,
@@ -314,12 +288,79 @@ def main():
                     "num_tests_passed": 0,
                     "test_pass_rate": 0.0,
                     "results": [],
-                    "error": "Tool had no findings",
-                })
+                    "error": f"Docker image not found: {docker_image}",
+                }
+            )
+            continue
+
+        # Check testgen results
+        testgen = load_testgen_results(testgen_dir, iid)
+        if testgen is None:
+            logger.warning("No testgen results for %s, skipping", iid)
+            all_results.append(
+                {
+                    "instance_id": iid,
+                    "repo": instance["repo"],
+                    "tool": args.tool,
+                    "model": args.model,
+                    "num_findings": 0,
+                    "agent_diff": "",
+                    "num_tests": 0,
+                    "num_tests_passed": 0,
+                    "test_pass_rate": 0.0,
+                    "results": [],
+                    "error": "No testgen results found",
+                }
+            )
+            continue
+
+        # Check tool findings
+        tool_data = load_tool_findings(tool_results_dir, iid, args.tool)
+        if tool_data is None:
+            logger.warning("No tool findings for %s, skipping", iid)
+            all_results.append(
+                {
+                    "instance_id": iid,
+                    "repo": instance["repo"],
+                    "tool": args.tool,
+                    "model": args.model,
+                    "num_findings": 0,
+                    "agent_diff": "",
+                    "num_tests": 0,
+                    "num_tests_passed": 0,
+                    "test_pass_rate": 0.0,
+                    "results": [],
+                    "error": "No tool findings found",
+                }
+            )
+            continue
+
+        if not tool_data.get("success") or not tool_data.get("findings"):
+            if args.include_empty:
+                logger.info(
+                    "Tool had no findings for %s (include-empty: recording as 0 tests)",
+                    iid,
+                )
+                all_results.append(
+                    {
+                        "instance_id": iid,
+                        "repo": instance["repo"],
+                        "tool": args.tool,
+                        "model": args.model,
+                        "num_findings": 0,
+                        "agent_diff": "",
+                        "num_tests": 0,
+                        "num_tests_passed": 0,
+                        "test_pass_rate": 0.0,
+                        "results": [],
+                        "error": "Tool had no findings",
+                    }
+                )
             else:
                 logger.warning(
                     "Tool had no findings for %s (success=%s), skipping",
-                    iid, tool_data.get("success"),
+                    iid,
+                    tool_data.get("success"),
                 )
             continue
 
@@ -327,7 +368,7 @@ def main():
 
     if not to_process:
         logger.info("All instances already processed or skipped.")
-        summary = write_summary(output_dir, all_results, 0.0, args.tool)
+        summary = write_summary(output_dir, all_results, 0.0, args.tool, args.agent)
         logger.info(
             "Summary: %d instances, %d/%d tests passed (%.1f%%)",
             summary["total_instances"],
@@ -344,7 +385,8 @@ def main():
 
     logger.info(
         "Processing %d instance(s) with %d worker(s)",
-        len(to_process), args.workers,
+        len(to_process),
+        args.workers,
     )
 
     # Check credentials
@@ -371,6 +413,7 @@ def main():
                 tool=args.tool,
                 docker_image=docker_image,
                 credentials_path=credentials_path,
+                agent=args.agent,
             )
             return result
         except Exception:
@@ -405,7 +448,8 @@ def main():
 
             logger.info(
                 "[%d/%d] Completed %s: %d/%d tests passed",
-                count, len(to_process),
+                count,
+                len(to_process),
                 inst["instance_id"],
                 result.get("num_tests_passed", 0),
                 result.get("num_tests", 0),
@@ -416,11 +460,16 @@ def main():
                 with lock:
                     elapsed_so_far = time.time() - start_time
                     summary = write_summary(
-                        output_dir, list(all_results), elapsed_so_far, args.tool
+                        output_dir,
+                        list(all_results),
+                        elapsed_so_far,
+                        args.tool,
+                        args.agent,
                     )
                 logger.info(
                     "Progress: %d/%d instances, %d/%d tests passed (%.1f%%)",
-                    len(all_results), len(all_stage3),
+                    len(all_results),
+                    len(all_stage3),
                     summary["total_tests_passed"],
                     summary["total_tests"],
                     summary["test_pass_rate"] * 100,
@@ -428,7 +477,9 @@ def main():
 
     # Final summary
     total_elapsed = time.time() - start_time
-    summary = write_summary(output_dir, all_results, total_elapsed, args.tool)
+    summary = write_summary(
+        output_dir, all_results, total_elapsed, args.tool, args.agent
+    )
 
     logger.info(
         "=== DONE === %d instances, %d/%d tests passed (%.1f%%), "

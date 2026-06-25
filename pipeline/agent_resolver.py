@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from execution.container_runtime import DockerContainerSession
@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # may read many files and make multiple edits in a large repo.
 CLAUDE_TIMEOUT = 600
 
+# Copilot CLI invocation timeout (seconds).
+COPILOT_TIMEOUT = 600
+
 
 @dataclass
 class AgentResolution:
@@ -31,10 +34,10 @@ class AgentResolution:
     comment_index: int
     comment_text: str
     file_path: str
-    resolved: bool          # Stage 3 test passed on agent's change
+    resolved: bool  # Stage 3 test passed on agent's change
     test_passed: bool
     test_output: str
-    agent_diff: str         # git diff of agent's changes (shared across batch)
+    agent_diff: str  # git diff of agent's changes (shared across batch)
     error: str | None
 
     def to_dict(self) -> dict:
@@ -66,7 +69,12 @@ def build_tool_prompt(
 
         # Support both pr-agent (issue_header/issue_content) and devin (type/description)
         header = finding.get("issue_header") or finding.get("type") or "Code Issue"
-        content = finding.get("issue_content") or finding.get("description") or finding.get("comment") or ""
+        content = (
+            finding.get("issue_content")
+            or finding.get("description")
+            or finding.get("comment")
+            or ""
+        )
 
         sections.append(
             f"### Finding {i}\n"
@@ -135,6 +143,62 @@ def build_batch_prompt(
 """
 
 
+def setup_copilot_in_container(session: DockerContainerSession) -> None:
+    """Install GitHub Copilot CLI and trust the workspace directory."""
+    # Install Copilot CLI via npm (Node.js should be available in most images)
+    result = session.run_command(
+        "npm install -g @github/copilot 2>&1 || "
+        "apt-get update -qq && apt-get install -y -qq nodejs npm && npm install -g @github/copilot 2>&1",
+        timeout=180,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to install Copilot CLI: {result.stderr[-2000:]}")
+    logger.info("Copilot CLI installed successfully")
+
+    # Trust the workspace so Copilot doesn't prompt
+    session.run_command(
+        "mkdir -p ~/.copilot && "
+        'echo \'{"trust":["/workspace","/testbed"]}\' > ~/.copilot/trust.json',
+        timeout=10,
+    )
+
+    # Mark workspace as safe for git
+    session.run_command(
+        "git config --global --add safe.directory /workspace",
+        timeout=10,
+    )
+
+
+def invoke_copilot_in_container(
+    session: DockerContainerSession,
+    prompt: str,
+    model: str | None = None,
+) -> tuple[str, int]:
+    """Invoke Copilot CLI in non-interactive --yolo mode.
+
+    Returns (stdout, returncode).
+    """
+    # Write prompt to a temp file locally, then copy into container.
+    # This avoids shell escaping issues with complex prompts.
+    prompt_path = "/tmp/copilot_prompt.txt"
+    with tempfile.NamedTemporaryFile(mode="w", suffix="_prompt.txt", delete=False) as f:
+        f.write(prompt)
+        local_prompt = Path(f.name)
+    try:
+        session.copy_to(local_prompt, prompt_path)
+    finally:
+        local_prompt.unlink(missing_ok=True)
+
+    # Build the copilot command
+    cmd = 'cd /workspace && copilot -p "$(cat /tmp/copilot_prompt.txt)" --yolo -s'
+
+    logger.info("  Copilot command: %s", cmd[:200])
+    result = session.run_command(cmd, timeout=COPILOT_TIMEOUT)
+    if result.returncode != 0:
+        logger.warning("  Copilot stderr: %s", (result.stderr or "")[:500])
+    return result.stdout, result.returncode
+
+
 def setup_claude_in_container(session: DockerContainerSession) -> None:
     """One-time container setup:
     1. Create non-root 'agent' user
@@ -149,7 +213,9 @@ def setup_claude_in_container(session: DockerContainerSession) -> None:
     )
     if result.returncode != 0:
         # User may already exist
-        logger.warning("useradd returned %d: %s", result.returncode, result.stderr.strip())
+        logger.warning(
+            "useradd returned %d: %s", result.returncode, result.stderr.strip()
+        )
 
     # Install Claude Code as agent user.
     # Use a generous timeout — parallel workers downloading simultaneously
@@ -159,9 +225,7 @@ def setup_claude_in_container(session: DockerContainerSession) -> None:
         timeout=300,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to install Claude Code: {result.stderr[-2000:]}"
-        )
+        raise RuntimeError(f"Failed to install Claude Code: {result.stderr[-2000:]}")
     logger.info("Claude Code installed successfully")
 
     # Copy credentials from neutral mount path into agent's .claude dir.
@@ -181,9 +245,7 @@ def setup_claude_in_container(session: DockerContainerSession) -> None:
         timeout=60,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to chown /workspace: {result.stderr[-1000:]}"
-        )
+        raise RuntimeError(f"Failed to chown /workspace: {result.stderr[-1000:]}")
 
 
 def invoke_claude_in_container(
@@ -201,9 +263,7 @@ def invoke_claude_in_container(
     # Write prompt to a file inside the container to avoid quoting issues.
     # Place it in agent's home dir so it's readable by the agent user.
     prompt_path = "/home/agent/prompt.txt"
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix="_prompt.txt", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix="_prompt.txt", delete=False) as f:
         f.write(prompt)
         local_prompt = Path(f.name)
     try:
@@ -217,7 +277,12 @@ def invoke_claude_in_container(
     # Use the full path to the claude binary to avoid PATH/shell issues.
     claude_bin = "/home/agent/.local/bin/claude"
     cmd = [
-        "su", "-", "agent", "-s", "/bin/bash", "-c",
+        "su",
+        "-",
+        "agent",
+        "-s",
+        "/bin/bash",
+        "-c",
         f"cd /workspace && "
         f"cat {prompt_path} | {claude_bin} -p --dangerously-skip-permissions "
         f"--model {model}",
@@ -226,9 +291,7 @@ def invoke_claude_in_container(
     logger.info("  Claude command: %s", cmd[:200])
     result = session.run_command(cmd, timeout=CLAUDE_TIMEOUT)
     if result.returncode != 0:
-        logger.warning(
-            "  Claude stderr: %s", (result.stderr or "")[:500]
-        )
+        logger.warning("  Claude stderr: %s", (result.stderr or "")[:500])
     return result.stdout, result.returncode
 
 
@@ -321,8 +384,11 @@ def resolve_instance(
                     comment_index=i,
                     comment_text=matched_comments[i][0]["text"],
                     file_path=matched_comments[i][0]["path"],
-                    resolved=False, test_passed=False, test_output="",
-                    agent_diff="", error=error,
+                    resolved=False,
+                    test_passed=False,
+                    test_output="",
+                    agent_diff="",
+                    error=error,
                 )
                 for i in ordered_indices
             ]
@@ -339,7 +405,11 @@ def resolve_instance(
         )
         logger.info("  Invoking Claude Code for %d comment(s)...", len(ordered_indices))
         agent_stdout, agent_rc = invoke_claude_in_container(session, prompt, model)
-        logger.info("  Claude Code returned (rc=%d, output=%d chars)", agent_rc, len(agent_stdout))
+        logger.info(
+            "  Claude Code returned (rc=%d, output=%d chars)",
+            agent_rc,
+            len(agent_stdout),
+        )
 
         # 4. Capture git diff
         diff_result = session.run_command("git diff", timeout=30)
@@ -357,8 +427,11 @@ def resolve_instance(
                     comment_index=i,
                     comment_text=matched_comments[i][0]["text"],
                     file_path=matched_comments[i][0]["path"],
-                    resolved=False, test_passed=False, test_output="",
-                    agent_diff="", error="Agent made no changes",
+                    resolved=False,
+                    test_passed=False,
+                    test_output="",
+                    agent_diff="",
+                    error="Agent made no changes",
                 )
                 for i in ordered_indices
             ]
@@ -377,16 +450,18 @@ def resolve_instance(
             logger.info(
                 "  Comment %d test result: %s", i, "PASS" if test_passed else "FAIL"
             )
-            resolutions.append(AgentResolution(
-                comment_index=i,
-                comment_text=comment["text"],
-                file_path=comment["path"],
-                resolved=test_passed,
-                test_passed=test_passed,
-                test_output=test_output,
-                agent_diff=agent_diff,
-                error=None,
-            ))
+            resolutions.append(
+                AgentResolution(
+                    comment_index=i,
+                    comment_text=comment["text"],
+                    file_path=comment["path"],
+                    resolved=test_passed,
+                    test_passed=test_passed,
+                    test_output=test_output,
+                    agent_diff=agent_diff,
+                    error=None,
+                )
+            )
         return resolutions
 
     except Exception as e:
@@ -396,8 +471,11 @@ def resolve_instance(
                 comment_index=i,
                 comment_text=matched_comments[i][0]["text"],
                 file_path=matched_comments[i][0]["path"],
-                resolved=False, test_passed=False, test_output="",
-                agent_diff="", error=str(e),
+                resolved=False,
+                test_passed=False,
+                test_output="",
+                agent_diff="",
+                error=str(e),
             )
             for i in ordered_indices
         ]
