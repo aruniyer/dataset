@@ -81,8 +81,15 @@ def load_tool_findings(
     if not result_file.exists():
         return None
     data = json.loads(result_file.read_text())
+    # Support both formats:
+    # 1. Nested: {"tools": {"tool-name": {"success": ..., "findings": [...]}}}
+    # 2. Direct: {"success": ..., "findings": [...]}
     tools = data.get("tools", {})
-    return tools.get(tool)
+    if tools and tool in tools:
+        return tools[tool]
+    if "findings" in data:
+        return data
+    return None
 
 
 def get_stage3_tests(testgen_results: dict) -> list[tuple[int, dict]]:

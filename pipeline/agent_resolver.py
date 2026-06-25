@@ -145,11 +145,20 @@ def build_batch_prompt(
 
 def setup_copilot_in_container(session: DockerContainerSession) -> None:
     """Install GitHub Copilot CLI and trust the workspace directory."""
-    # Install Copilot CLI via npm (Node.js should be available in most images)
+    # Install Node.js from binary tarball (apt is often broken in SWE-bench images)
+    # then install Copilot CLI via npm
     result = session.run_command(
-        "npm install -g @github/copilot 2>&1 || "
-        "apt-get update -qq && apt-get install -y -qq nodejs npm && npm install -g @github/copilot 2>&1",
-        timeout=180,
+        "node --version 2>/dev/null || "
+        "(curl -fsSL https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz "
+        "| tar -xJ -C /usr/local --strip-components=1)",
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to install Node.js: {result.stderr[-2000:]}")
+
+    result = session.run_command(
+        "npm install -g @github/copilot 2>&1",
+        timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to install Copilot CLI: {result.stderr[-2000:]}")
@@ -190,7 +199,7 @@ def invoke_copilot_in_container(
         local_prompt.unlink(missing_ok=True)
 
     # Build the copilot command
-    cmd = 'cd /workspace && copilot -p "$(cat /tmp/copilot_prompt.txt)" --yolo -s'
+    cmd = 'cd /workspace && copilot -p "Read /tmp/copilot_prompt.txt and apply ALL code fixes described in it. Make minimal changes." --yolo -s --model gpt-5.4-mini'
 
     logger.info("  Copilot command: %s", cmd[:200])
     result = session.run_command(cmd, timeout=COPILOT_TIMEOUT)

@@ -1,0 +1,23 @@
+[project]
+name = "review-bench"
+version = "0.1.0"
+description = "Generate executable pytest tests from code review comments and validate them against before/after code versions"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets",
+    "devpi-server>=6.19.1",
+    "gradio>=6.10.0",
+    "ipykernel>=7.2.0",
+    "ipynbname>=2025.8.0.0",
+    "litellm",
+    "matplotlib>=3.10.8",
+    "matplotlib-venn>=1.1.2",
+    "pytest>=9.0.2",
+    "venn>=0.1.3",
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "-s",
+]
